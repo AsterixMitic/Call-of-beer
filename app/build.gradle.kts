@@ -64,6 +64,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     implementation("com.github.felHR85:UsbSerial:6.1.0")
+    implementation("androidx.core:core-splashscreen:1.0.1")
+
 }
 
 

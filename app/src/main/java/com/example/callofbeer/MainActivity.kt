@@ -1,5 +1,6 @@
 package com.example.callofbeer
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.IntentFilter
@@ -9,49 +10,76 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.felhr.usbserial.UsbSerialDevice
 import com.felhr.usbserial.UsbSerialInterface
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var usbManager: UsbManager
     private var usbSerial: UsbSerialDevice? = null
     private var usbDevice: UsbDevice? = null
+    private val connectedUsbDevice = mutableStateOf<UsbDevice?>(null)
     private lateinit var usbReceiver: UsbBroadcastReceiver
-    private var value : Double? = -1.0
-    private val valueToShow = mutableStateOf(value)
+    private val valueToShow = mutableStateOf<Double?>(null)
+    private val baudRate = 57600
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
+
         super.onCreate(savedInstanceState)
+
+        //TODO: Za splash screen -> pivo se polako prazni i ostaje logo!
+        installSplashScreen()
+
         usbManager = getSystemService(USB_SERVICE) as UsbManager
 
+        val filter = IntentFilter().apply {
+            addAction("com.example.USB_PERMISSION")
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
 
-        usbReceiver = UsbBroadcastReceiver { device -> connectToDevice(device) }
-        registerReceiver(usbReceiver, IntentFilter("com.example.USB_PERMISSION"))
+        // Setting up the UsbBroadcastReceiver
+        usbReceiver = UsbBroadcastReceiver(
+            onPermissionGranted = { device -> connectToDevice(device) },
+            onDeviceAttached = { device -> requestUsbPermission(device) },
+            onDeviceDetached = {
+                usbSerial = null
+                usbDevice = null
+                connectedUsbDevice.value = null
+                valueToShow.value = null
+            },
+            usbManager = usbManager
+        )
+
+        registerReceiver(usbReceiver, filter)
+
+        // Checking the initial case where the Arduino device
+        // is already connected...
+        usbManager.deviceList.values.firstOrNull()?.let { device ->
+            if (usbManager.hasPermission(device)) {
+                // Device is already connected and permission is granted
+                connectToDevice(device)
+            } else {
+                // Device is connected but doesnt have permission
+                requestUsbPermission(device)
+            }
+        }
 
         setContent {
             USBSerialApp()
@@ -63,11 +91,18 @@ class MainActivity : ComponentActivity() {
         unregisterReceiver(usbReceiver)
     }
 
+    // Function for permission request
     private fun requestUsbPermission(device: UsbDevice) {
-        val permissionIntent = PendingIntent.getBroadcast(this, 0, Intent("com.example.USB_PERMISSION"), PendingIntent.FLAG_MUTABLE)
+        val permissionIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            Intent("com.example.USB_PERMISSION"),
+            PendingIntent.FLAG_MUTABLE
+        )
         usbManager.requestPermission(device, permissionIntent)
     }
 
+    // Function to connect to device & read it's data
     private fun connectToDevice(device: UsbDevice) {
         val connection = usbManager.openDevice(device)
         if (connection == null) {
@@ -75,9 +110,11 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        // Arduino specific parameters
         usbSerial = UsbSerialDevice.createUsbSerialDevice(device, connection)
+        //TODO: Github & AOR resursi za objasnjenje...
         if (usbSerial != null && usbSerial!!.open()) {
-            usbSerial!!.setBaudRate(57600)
+            usbSerial!!.setBaudRate(baudRate)
             usbSerial!!.setDataBits(UsbSerialInterface.DATA_BITS_8)
             usbSerial!!.setStopBits(UsbSerialInterface.STOP_BITS_1)
             usbSerial!!.setParity(UsbSerialInterface.PARITY_NONE)
@@ -85,19 +122,18 @@ class MainActivity : ComponentActivity() {
             usbSerial!!.read { bytes ->
                 val receivedData = String(bytes)
                 Log.d("USB", "Received: $receivedData")
-                value = receivedData.toDoubleOrNull()
-                valueToShow.value = value
+                valueToShow.value = receivedData.toDoubleOrNull()
             }
         } else {
             Log.e("USB", "Failed to open USB serial")
         }
+        usbDevice = device
+        connectedUsbDevice.value = device
     }
+
 
     @Composable
     fun USBSerialApp() {
-        val devices = usbManager.deviceList.values.toList()
-        var connectedDevice by remember { mutableStateOf<UsbDevice?>(null) }
-        val scope = rememberCoroutineScope()
 
         Column(
             modifier = Modifier
@@ -105,37 +141,20 @@ class MainActivity : ComponentActivity() {
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            Text("Available USB Devices:", color = Color.Black)
-
-            devices.forEach { device ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp)
-                        .clickable {
-                            scope.launch(Dispatchers.IO) {
-                                requestUsbPermission(device)
-                                connectedDevice = device
-                            }
-                        },
-                    colors = CardDefaults.cardColors(containerColor = Color.DarkGray)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Device: ${device.deviceName}", color = Color.White)
-                        Text("Vendor ID: ${device.vendorId}", color = Color.White)
-                        Text("Product ID: ${device.productId}", color = Color.White)
-                    }
-                }
+            val connectedDevice = connectedUsbDevice.value
+            if (connectedDevice == null) {
+                Text("Waiting for device...", color = Color.Black)
+            } else {
+                Text("Connected to: ${connectedDevice.deviceName}", color = Color.Black)
+                Spacer(modifier = Modifier.height(20.dp))
+                Text(
+                    valueToShow.value?.let { "Weight: ${"%.2f".format(it)} g" } ?: "Connecting & Initializing...",
+                    color = Color.Black,
+                    fontSize = 30.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(16.dp)
+                )
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
-            Text("Connected Device: ${connectedDevice?.deviceName ?: "None"}", color = Color.Black)
-            Text("${valueToShow.value ?: "Setting up please wait..."}",
-                color = Color.Black,
-                fontSize = 30.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(16.dp)
-            )
         }
     }
 }
